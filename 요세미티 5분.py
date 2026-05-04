@@ -1,16 +1,16 @@
 """
 ==============================================
- 요세미티 캠핑장 빈자리 모니터링 스크립트 v4
- - 요세미티 내 모든 캠핑장 체크
+ 요세미티 캠핑장 빈자리 모니터링 (GitHub Actions용)
+ - 한 번 체크하고 종료 (Actions가 5분마다 재실행)
  - 6/22-25 전체 + 1박씩(22-23, 23-24, 24-25)
- - 5분마다 체크
  - Recreation.gov → Gmail 이메일 알림
 ==============================================
 """
 
 import requests
 import smtplib
-import time
+import json
+import os
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
@@ -22,7 +22,6 @@ CONFIG = {
     "gmail_sender":   "sungmokbyun@gmail.com",
     "gmail_password": "lmyevnmuhkwpdczs",
     "notify_email":   "sungmokbyun@gmail.com",
-    "check_interval_seconds": 300,  # 5분마다 체크
 }
 
 # 체크할 날짜 조합
@@ -46,7 +45,27 @@ CAMPGROUNDS = [
     {"id": "10083831", "name": "Porcupine Flat",   "rv": False},
     {"id": "232453",   "name": "Bridalveil Creek",  "rv": False},
 ]
+
+# 알림 이력 파일 (중복 알림 방지)
+NOTIFIED_FILE = "notified.json"
 # =============================================
+
+
+def load_notified():
+    """이미 알림 보낸 목록 불러오기"""
+    if os.path.exists(NOTIFIED_FILE):
+        try:
+            with open(NOTIFIED_FILE, "r") as f:
+                return set(json.load(f))
+        except:
+            pass
+    return set()
+
+
+def save_notified(notified):
+    """알림 보낸 목록 저장"""
+    with open(NOTIFIED_FILE, "w") as f:
+        json.dump(list(notified), f)
 
 
 def check_availability(campground_id, start_date, end_date):
@@ -146,7 +165,7 @@ def send_email(results):
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(sender, password)
             server.sendmail(sender, receiver, msg.as_string())
-        print(f"  ✅ 이메일 발송 완료! → {receiver}")
+        print(f"  ✅ 이메일 발송 완료!")
         return True
     except Exception as e:
         print(f"  ❌ 이메일 발송 실패: {e}")
@@ -154,63 +173,49 @@ def send_email(results):
 
 
 def main():
-    total = len(CAMPGROUNDS) * len(DATE_RANGES)
     print("=" * 60)
-    print("  요세미티 캠핑장 빈자리 모니터링 v4 시작!")
-    print(f"  캠핑장 {len(CAMPGROUNDS)}개 × 날짜 {len(DATE_RANGES)}가지 = 총 {total}가지 체크")
-    print(f"  체크 날짜: 6/22~25 전체 + 1박씩")
-    print(f"  체크 주기: 5분마다")
+    print("  요세미티 캠핑장 빈자리 체크 시작! (GitHub Actions용)")
+    print(f"  시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
 
-    notified = set()
+    notified = load_notified()
+    found_results = []
 
-    while True:
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"\n🔍 [{now}] 체크 시작...")
-        print("-" * 60)
+    for camp in CAMPGROUNDS:
+        for dr in DATE_RANGES:
+            key = f"{camp['id']}_{dr['start']}_{dr['end']}"
+            if key in notified:
+                print(f"  ⏭️  {camp['name']} [{dr['label']}] 이미 알림 발송됨, 스킵")
+                continue
 
-        found_results = []
+            sites, error = check_availability(camp["id"], dr["start"], dr["end"])
 
-        for camp in CAMPGROUNDS:
-            for dr in DATE_RANGES:
-                key = f"{camp['id']}_{dr['start']}_{dr['end']}"
-                if key in notified:
-                    continue
+            if error:
+                print(f"  ⚠️  {camp['name']} [{dr['label']}] 오류: {error}")
+            elif sites:
+                print(f"  🎉 {camp['name']} [{dr['label']}] → {len(sites)}개 빈자리!")
+                found_results.append({
+                    "camp_id":   camp["id"],
+                    "camp_name": camp["name"],
+                    "rv":        camp["rv"],
+                    "label":     dr["label"],
+                    "count":     len(sites),
+                    "key":       key,
+                })
+            else:
+                print(f"  ❌ {camp['name']} [{dr['label']}] 없음")
 
-                sites, error = check_availability(camp["id"], dr["start"], dr["end"])
+    if found_results:
+        print(f"\n📧 {len(found_results)}건 빈자리 발견! 이메일 발송 중...")
+        if send_email(found_results):
+            for r in found_results:
+                notified.add(r["key"])
+            save_notified(notified)
+    else:
+        print("\n  현재 모든 캠핑장 빈자리 없음.")
 
-                if error:
-                    print(f"  ⚠️  {camp['name']} [{dr['label']}] 오류")
-                elif sites:
-                    print(f"  🎉 {camp['name']} [{dr['label']}] → {len(sites)}개 빈자리!")
-                    found_results.append({
-                        "camp_id":   camp["id"],
-                        "camp_name": camp["name"],
-                        "rv":        camp["rv"],
-                        "label":     dr["label"],
-                        "count":     len(sites),
-                    })
-                    notified.add(key)
-                else:
-                    print(f"  ❌ {camp['name']} [{dr['label']}] 없음")
-
-                time.sleep(0.5)
-
-        if found_results:
-            print(f"\n📧 {len(found_results)}건 빈자리! 이메일 발송 중...")
-            send_email(found_results)
-        else:
-            print("\n  현재 모든 캠핑장 빈자리 없음.")
-
-        next_check = datetime.fromtimestamp(
-            time.time() + CONFIG["check_interval_seconds"]
-        ).strftime("%H:%M:%S")
-        print(f"\n⏰ 다음 체크: {next_check} (Ctrl+C로 종료)")
-        time.sleep(CONFIG["check_interval_seconds"])
+    print("\n✅ 체크 완료!")
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n\n모니터링 종료.")
+    main()
